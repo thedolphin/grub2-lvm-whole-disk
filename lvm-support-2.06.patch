@@ -1,0 +1,339 @@
+From: Alexander Rumyantsev <github.com@rumyantsev.com>
+Date: Mon Jul 13 14:34:12 UTC 2015
+Subject: [PATCH] Install to LVM PVs
+
+Original patch made by Gabriel de Perthuis <g2p.code@gmail.com>
+http://lists.gnu.org/archive/html/grub-devel/2013-09/msg00113.html
+
+This patch lets grub install to a reserved area in LVM physical volumes.
+These bootloader areas can be created with LVM 2.02.99 and the --bootloaderareasize argument to pvcreate and vgconvert.
+Tested it in QEMU and VMware, installing to and booting a disk that contains a PV and no partition table.
+
+Adopted for RHEL-based distros by Alexander Rumyantsev <github.com@rumyantsev.com>
+Just add this file to patches list in RPM spec file and rebuild the package
+
+diff -Naur grub-2.06.orig/grub-core/disk/lvm.c grub-2.06/grub-core/disk/lvm.c
+--- grub-2.06.orig/grub-core/disk/lvm.c	2023-03-05 13:14:42.558637854 +0300
++++ grub-2.06/grub-core/disk/lvm.c	2023-03-05 13:15:09.890765170 +0300
+@@ -132,6 +132,38 @@
+     }
+ }
+ 
++static struct grub_lvm_pv_header *
++grub_lvm_get_pvh(grub_disk_t disk, char buf[static GRUB_LVM_LABEL_SIZE])
++{
++  struct grub_lvm_label_header *lh = (struct grub_lvm_label_header *) buf;
++  unsigned int i;
++
++  /* Search for label. */
++  for (i = 0; i < GRUB_LVM_LABEL_SCAN_SECTORS; i++)
++    {
++      if (grub_disk_read (disk, i, 0, GRUB_LVM_LABEL_SIZE, buf))
++       return NULL;
++
++      if ((! grub_strncmp ((char *)lh->id, GRUB_LVM_LABEL_ID,
++                          sizeof (lh->id)))
++         && (! grub_strncmp ((char *)lh->type, GRUB_LVM_LVM2_LABEL,
++                             sizeof (lh->type))))
++       break;
++    }
++
++  /* Return if we didn't find a label. */
++  if (i == GRUB_LVM_LABEL_SCAN_SECTORS)
++    {
++#ifdef GRUB_UTIL
++      grub_util_info ("no LVM signature found");
++#endif
++      return NULL;
++    }
++
++  return (struct grub_lvm_pv_header *) (buf + grub_le_to_cpu32(lh->offset_xl));
++}
++
++
+ static struct grub_diskfilter_vg * 
+ grub_lvm_detect (grub_disk_t disk,
+ 		 struct grub_diskfilter_pv_id *id,
+@@ -145,7 +177,6 @@
+   char pv_id[GRUB_LVM_ID_STRLEN+1];
+   char *metadatabuf, *mda_end, *vgname;
+   const char *p, *q;
+-  struct grub_lvm_label_header *lh = (struct grub_lvm_label_header *) buf;
+   struct grub_lvm_pv_header *pvh;
+   struct grub_lvm_disk_locn *dlocn;
+   struct grub_lvm_mda_header *mdah;
+@@ -155,44 +186,9 @@
+   struct grub_diskfilter_vg *vg;
+   struct grub_diskfilter_pv *pv;
+ 
+-  /* Search for label. */
+-  for (i = 0; i < GRUB_LVM_LABEL_SCAN_SECTORS; i++)
+-    {
+-      err = grub_disk_read (disk, i, 0, sizeof(buf), buf);
+-      if (err)
+-	goto fail;
+-
+-      if ((! grub_strncmp ((char *)lh->id, GRUB_LVM_LABEL_ID,
+-			   sizeof (lh->id)))
+-	  && (! grub_strncmp ((char *)lh->type, GRUB_LVM_LVM2_LABEL,
+-			      sizeof (lh->type))))
+-	break;
+-    }
+-
+-  /* Return if we didn't find a label. */
+-  if (i == GRUB_LVM_LABEL_SCAN_SECTORS)
+-    {
+-#ifdef GRUB_UTIL
+-      grub_util_info ("no LVM signature found");
+-#endif
+-      goto fail;
+-    }
+-
+-  /*
+-   * We read a grub_lvm_pv_header and then 2 grub_lvm_disk_locns that
+-   * immediately follow the PV header. Make sure we have space for both.
+-   */
+-  if (grub_le_to_cpu32 (lh->offset_xl) >=
+-      GRUB_LVM_LABEL_SIZE - sizeof (struct grub_lvm_pv_header) -
+-      2 * sizeof (struct grub_lvm_disk_locn))
+-    {
+-#ifdef GRUB_UTIL
+-      grub_util_info ("LVM PV header/disk locations are beyond the end of the block");
+-#endif
+-      goto fail;
+-    }
+-
+-  pvh = (struct grub_lvm_pv_header *) (buf + grub_le_to_cpu32(lh->offset_xl));
++  pvh = grub_lvm_get_pvh(disk, buf);
++  if (! pvh)
++    goto fail;
+ 
+   for (i = 0, j = 0; i < GRUB_LVM_ID_LEN; i++)
+     {
+@@ -205,7 +201,7 @@
+   dlocn = pvh->disk_areas_xl;
+ 
+   dlocn++;
+-  /* Is it possible to have multiple data/metadata areas? I haven't
++  /* Is it possible to have multiple data areas? I haven't
+      seen devices that have it. */
+   if (dlocn->offset)
+     {
+@@ -1072,6 +1068,89 @@
+   return NULL;
+ }
+ 
++#ifdef GRUB_UTIL
++int
++grub_util_is_lvm(grub_disk_t disk)
++{
++  struct grub_diskfilter_pv_id id;
++  struct grub_diskfilter_vg *vg;
++  grub_disk_addr_t start_sector;
++  vg = grub_lvm_detect(disk, &id, &start_sector);
++  if (! vg)
++    return 0;
++  /* don't free the vg, it's held by grub_diskfilter_vg_register */
++  grub_free(id.uuid);
++  return 1;
++}
++
++grub_err_t
++grub_util_lvm_embed (struct grub_disk *disk, unsigned int *nsectors,
++                    unsigned int max_nsectors,
++                    grub_embed_type_t embed_type,
++                    grub_disk_addr_t **sectors)
++{
++  char buf[GRUB_LVM_LABEL_SIZE];
++  struct grub_lvm_pv_header *pvh;
++  struct grub_lvm_pv_header_ext *pvh_ext;
++  struct grub_diskfilter_pv *pv = NULL;
++  struct grub_diskfilter_vg *vg = NULL;
++  struct grub_lvm_disk_locn *dlocn;
++  grub_uint64_t ba_offset, ba_size, ba_start_sector;
++  unsigned int i;
++
++  if (embed_type != GRUB_EMBED_PCBIOS)
++    return grub_error (GRUB_ERR_NOT_IMPLEMENTED_YET,
++                      "LVM curently supports only PC-BIOS embedding");
++  if (disk->partition)
++    return grub_error (GRUB_ERR_BUG, "disk isn't LVM");
++  pv = grub_diskfilter_get_pv_from_disk (disk, &vg);
++  if (! pv)
++    return grub_error (GRUB_ERR_BUG, "disk isn't LVM");
++
++  pvh = grub_lvm_get_pvh(disk, buf);
++  if (! pvh)
++    return grub_error (GRUB_ERR_BUG, "disk isn't LVM");
++
++  dlocn = pvh->disk_areas_xl;
++
++  /* skip past the data area list */
++  while (dlocn->offset)
++    dlocn++;
++  dlocn++;
++  /* and the metadata area list */
++  while (dlocn->offset)
++    dlocn++;
++  dlocn++;
++
++  pvh_ext = (struct grub_lvm_pv_header_ext*)dlocn;
++  if (! pvh_ext->version_xl)
++    return grub_error (GRUB_ERR_BUG, "LVM PV doesn't have a bootloader area");
++
++  dlocn = pvh_ext->disk_areas_xl;
++  ba_offset = grub_le_to_cpu64 (dlocn->offset);
++  ba_size = grub_le_to_cpu64 (dlocn->size);
++  if (! (ba_offset && ba_size))
++    return grub_error (GRUB_ERR_BUG, "LVM PV doesn't have a bootloader area");
++  /* could be worked around with extra arithmetic if this actually happens */
++  if (ba_offset % GRUB_DISK_SECTOR_SIZE)
++    return grub_error (
++      GRUB_ERR_BUG, "LVM bootloader area is improperly aligned");
++  ba_start_sector = ba_offset / GRUB_DISK_SECTOR_SIZE;
++
++  *nsectors = ba_size / GRUB_DISK_SECTOR_SIZE;
++  if (*nsectors > max_nsectors)
++    *nsectors = max_nsectors;
++
++  *sectors = grub_malloc (*nsectors * sizeof (**sectors));
++  if (!*sectors)
++    return grub_errno;
++  for (i = 0; i < *nsectors; i++)
++    (*sectors)[i] = ba_start_sector + i;
++
++  return GRUB_ERR_NONE;
++}
++#endif
++
+ 
+ 
+ static struct grub_diskfilter grub_lvm_dev = {
+diff -Naur grub-2.06.orig/include/grub/diskfilter.h grub-2.06/include/grub/diskfilter.h
+--- grub-2.06.orig/include/grub/diskfilter.h	2023-03-05 13:14:42.635638213 +0300
++++ grub-2.06/include/grub/diskfilter.h	2023-03-05 13:15:09.891765175 +0300
+@@ -75,6 +75,9 @@
+ #ifdef GRUB_UTIL
+   char **partmaps;
+ #endif
++  /* Optional bootloader embedding area */
++  grub_uint64_t ba_offset;
++  grub_uint64_t ba_size;
+ };
+ 
+ struct grub_diskfilter_lv {
+diff -Naur grub-2.06.orig/include/grub/emu/hostdisk.h grub-2.06/include/grub/emu/hostdisk.h
+--- grub-2.06.orig/include/grub/emu/hostdisk.h	2023-03-05 13:14:42.625638166 +0300
++++ grub-2.06/include/grub/emu/hostdisk.h	2023-03-05 13:15:09.891765175 +0300
+@@ -45,9 +45,16 @@
+ char *
+ grub_util_get_ldm (grub_disk_t disk, grub_disk_addr_t start);
+ int
++grub_util_is_lvm (grub_disk_t disk);
++int
+ grub_util_is_ldm (grub_disk_t disk);
+ #ifdef GRUB_UTIL
+ grub_err_t
++grub_util_lvm_embed (struct grub_disk *disk, unsigned int *nsectors,
++                    unsigned int max_nsectors,
++                    grub_embed_type_t embed_type,
++                    grub_disk_addr_t **sectors);
++grub_err_t
+ grub_util_ldm_embed (struct grub_disk *disk, unsigned int *nsectors,
+ 		     unsigned int max_nsectors,
+ 		     grub_embed_type_t embed_type,
+diff -Naur grub-2.06.orig/include/grub/lvm.h grub-2.06/include/grub/lvm.h
+--- grub-2.06.orig/include/grub/lvm.h	2023-03-05 13:14:42.638638227 +0300
++++ grub-2.06/include/grub/lvm.h	2023-03-05 13:15:09.891765175 +0300
+@@ -62,6 +62,13 @@
+   struct grub_lvm_disk_locn disk_areas_xl[0];	/* Two lists */
+ } GRUB_PACKED;
+ 
++struct grub_lvm_pv_header_ext {
++  grub_uint32_t version_xl;
++  grub_uint32_t flags_xl;
++  /* NULL-terminated list of bootloader embedding areas */
++  struct grub_lvm_disk_locn disk_areas_xl[0];
++} __attribute__ ((packed));
++
+ #define GRUB_LVM_FMTT_MAGIC "\040\114\126\115\062\040\170\133\065\101\045\162\060\116\052\076"
+ #define GRUB_LVM_FMTT_VERSION 1
+ #define GRUB_LVM_MDA_HEADER_SIZE 512
+diff -Naur grub-2.06.orig/util/setup.c grub-2.06/util/setup.c
+--- grub-2.06.orig/util/setup.c	2023-03-05 13:14:42.674638394 +0300
++++ grub-2.06/util/setup.c	2023-03-05 13:13:28.372292303 +0300
+@@ -403,7 +403,7 @@
+       .container = dest_dev->disk->partition,
+       .multiple_partmaps = 0
+     };
+-    int is_ldm;
++    int is_ldm, is_lvm;
+     grub_err_t err;
+     grub_disk_addr_t *sectors;
+     unsigned int i;
+@@ -412,6 +412,7 @@
+ 
+     grub_partition_iterate (dest_dev->disk, identify_partmap, &ctx);
+ 
++#ifndef GRUB_SETUP_SPARC64
+ #ifdef GRUB_SETUP_BIOS
+     /* Copy the partition table.  */
+     if (ctx.dest_partmap ||
+@@ -422,6 +423,7 @@
+ 
+     free (tmp_img);
+ #endif
++#endif
+ 
+     if (ctx.container
+ 	&& grub_strcmp (ctx.container->partmap->name, "msdos") == 0
+@@ -438,8 +440,9 @@
+       grub_errno = GRUB_ERR_NONE;
+ 
+     is_ldm = grub_util_is_ldm (dest_dev->disk);
++    is_lvm = grub_util_is_lvm (dest_dev->disk);
+ 
+-    if (fs_probe)
++    if (!is_lvm && fs_probe)
+       {
+ 	if (!fs && !ctx.dest_partmap)
+ 	  grub_util_error (_("unable to identify a filesystem in %s; safety check can't be performed"),
+@@ -477,7 +480,7 @@
+ 
+       }
+ 
+-    if (! ctx.dest_partmap && ! fs && !is_ldm)
++    if (! ctx.dest_partmap && ! fs && !is_ldm && !is_lvm)
+       {
+ 	grub_util_warn ("%s", _("Attempting to install GRUB to a partitionless disk or to a partition.  This is a BAD idea."));
+ 	goto unable_to_embed;
+@@ -526,7 +529,28 @@
+     maxsec += 2;
+ #endif
+ 
+-    if (is_ldm)
++    if (is_lvm) {
++      err = grub_util_lvm_embed (dest_dev->disk, &nsec, maxsec,
++                                 GRUB_EMBED_PCBIOS, &sectors);
++
++#ifdef GRUB_SETUP_BIOS
++      /* DIRTY HACK: Do not allow blkid to determine msdos partition type */
++
++      /* clear partition table */
++      memset (boot_img + GRUB_BOOT_MACHINE_WINDOWS_NT_MAGIC,
++              0, GRUB_BOOT_MACHINE_PART_END - GRUB_BOOT_MACHINE_WINDOWS_NT_MAGIC);
++
++      /* first partition boot flag: invalid partition */
++      ((struct grub_msdos_partition_entry *)
++        (boot_img + GRUB_BOOT_MACHINE_PART_START))->flag = 0x01;
++
++      /* first partition type: GPT */
++      ((struct grub_msdos_partition_entry *)
++        (boot_img + GRUB_BOOT_MACHINE_PART_START))->type = GRUB_PC_PARTITION_TYPE_GPT_DISK;
++#endif
++
++    }
++    else if (is_ldm)
+       err = grub_util_ldm_embed (dest_dev->disk, &nsec, maxsec,
+ 				 GRUB_EMBED_PCBIOS, &sectors);
+     else if (ctx.dest_partmap)
