@@ -1,0 +1,27 @@
+# WIP!
+FROM debian:trixie AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DEB_BUILD_OPTIONS="nocheck nodoc notest"
+ENV NAME="Alexander Rumyantsev"
+ENV EMAIL=github.com@rumyantsev.com
+
+RUN set -x; set -e;\
+ sed -i -e 's/Types: deb/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources;\
+ apt update;\
+ apt -y install devscripts build-essential debhelper fakeroot;\
+ apt -y build-dep grub2
+
+COPY lvm-support-grub2.12-debian13.0.patch .
+
+RUN set -e; set -x;\
+ install -m 777 -d /build; cd /build;\
+ apt source grub2;\
+ cd grub2-2.12;\
+ cp /lvm-support-grub2.12-debian13.0.patch debian/patches/lvm-support.patch;\
+ echo lvm-support.patch >> debian/patches/series;\
+ dch -l +lvm "LVM support";\
+ dpkg-buildpackage -us -uc
+
+FROM scratch
+COPY --from=builder ...
