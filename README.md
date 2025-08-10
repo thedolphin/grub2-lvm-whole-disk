@@ -24,5 +24,3 @@ GRUB 2 supports booting from LVM volumes, but — surprisingly — does not supp
 6. On Debian, run `update-grub`. On RHEL, more steps are needed — fix files in `/boot/loader` by adding `/boot/` to all paths, then run: `grub2-mkconfig -o /etc/grub.cfg`
 7. Reboot, switch back the boot drive in BIOS or VM configuration and voilà.
 8. Remove the second drive as it is no longer needed.
-
-Once installed 
