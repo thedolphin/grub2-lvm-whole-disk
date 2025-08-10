@@ -12,34 +12,15 @@ See discussion at: http://lists.gnu.org/archive/html/grub-devel/2013-09/msg00113
 
 ## Background
 
-GRUB 2 supports booting from LVM volumes, but—surprisingly—does not support installing the bootloader directly onto an LVM-managed disk. This repository provides a patch that adds that capability, allowing you to install GRUB directly onto a disk with LVM.
+GRUB 2 supports booting from LVM volumes, but — surprisingly — does not support installing the bootloader directly onto an LVM-managed disk. This repository provides a patch that adds that capability, allowing you to install GRUB directly onto a disk with LVM.
 
-## Preparation
+## Serving suggestion — product may not look exactly as shown
 
-Before installing, the LVM disk must be initialized using:
-
-```bash
-pvcreate --bootloaderareasize 1m /dev/your-lvm-disk
-```
-
-This ensures a dedicated 1 MB "bootloader area" that GRUB can use.
-
-## Installation Instructions
-
-* Prepare your LVM disk (see “Preparation” above).
-* Download the appropriate OS-specific binary from the grub-install/ directory in this repository.
-* Use the downloaded binary to install GRUB as usual. For example:
-
-```bash
-    ./grub-install-<os-specific-binary> /dev/your-lvm-disk
-```
-
-This patch allows the installer to write the bootloader directly onto an LVM disk—something not possible with standard GRUB.
-
-## Repository Contents
-
-lvm-support-*.patch – Patches tailored for various GRUB2 versions.
-
-grub-install/ – Prebuilt binaries for installing GRUB with LVM support.
-
-(Optional) Dockerfiles for building on Debian 13 (Dockerfile.debian13).
+1. Prepare the VM by adding a second disk for `/boot`. Alternatively, prepare a bare server and any kind of disk for temporarily placing `/boot`, for example, a USB flash drive.
+2. Boot from any live distro media, and prepare the primary disk for the system: `pvcreate --bootloaderareaseize 1m /dev/<disk>`. Rescue shells provided by installation media can be suitable for this purpose, but Debian needs some more sophisticated moves. Then create the volume group and logical volumes as you like. Personally, I settled on a minimal layout with separate `/` and `/var`.
+3. Boot the installer. Pick the prepared volumes for the system. Oddly enough, neither Debbie’s installer nor the Red Cap’s Anaconda will let you create an LVM across the entire disk, but both are perfectly fine with you selecting volumes that already exist. Place `/boot` on the second disk, and also select the second disk for installing the bootloader. Remember to switch the boot drive in BIOS or VM configuration.
+4. After booting into the installed OS, remount `/boot` to `/mnt` and move everything into the root partition, then remove `/boot` from `/etc/fstab`. If you don't remove `/boot` from `fstab`, the system won’t boot.
+5. Download the appropriate binary from the repo and run it like a normal `grub-install`, using the LVM disk as the destination.
+6. On Debian, run `update-grub`. On RHEL, more steps are needed — fix files in `/boot/loader` by adding `/boot/` to all paths, then run: `grub2-mkconfig -o /etc/grub.cfg`
+7. Reboot, switch back the boot drive in BIOS or VM configuration and voilà.
+8. Remove the second drive as it is no longer needed.
